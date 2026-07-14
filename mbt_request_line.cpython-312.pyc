@@ -1,0 +1,50 @@
+from odoo import _, api, fields, models
+from odoo.exceptions import ValidationError
+
+
+class MbtRequestLine(models.Model):
+    _name = 'mbt.request.line'
+    _description = 'Multi-Branch Transfer Request Line'
+
+    request_id = fields.Many2one(
+        'mbt.request',
+        required=True,
+        ondelete='cascade',
+        index=True,
+    )
+    product_id = fields.Many2one(
+        'product.product',
+        string='Product',
+        required=True,
+        domain=[('type', 'in', ('product', 'consu'))],
+    )
+    product_uom_qty = fields.Float(
+        string='Quantity',
+        required=True,
+        default=1.0,
+        digits='Product Unit of Measure',
+    )
+    product_uom_id = fields.Many2one(
+        'uom.uom',
+        string='UoM',
+        required=True,
+        help="Unit of Measure. Will default to the product's unit of measure.",
+    )
+
+    _qty_positive = models.Constraint(
+        'CHECK(product_uom_qty > 0)',
+        'Quantity must be greater than zero.',
+    )
+
+    @api.onchange('product_id')
+    def _onchange_product_id(self):
+        if self.product_id and not self.product_uom_id:
+            self.product_uom_id = self.product_id.uom_id
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get('product_id') and not vals.get('product_uom_id'):
+                product = self.env['product.product'].browse(vals['product_id'])
+                vals['product_uom_id'] = product.uom_id.id
+        return super().create(vals_list)

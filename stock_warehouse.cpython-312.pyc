@@ -1,0 +1,51 @@
+from odoo import _, api, fields, models
+from odoo.exceptions import ValidationError
+
+
+class StockWarehouse(models.Model):
+    _inherit = 'stock.warehouse'
+
+    x_is_main_source = fields.Boolean(
+        string='Is Main Source',
+        default=False,
+        help='Mark this warehouse as the single Main source of goods '
+             'for the Multi-Branch Transfer flow.',
+    )
+    x_is_transit = fields.Boolean(
+        string='Is Transit',
+        default=False,
+        help='Mark this warehouse as the single Transit buffer used by '
+             'the Multi-Branch Transfer flow.',
+    )
+
+    @api.constrains('x_is_main_source', 'company_id')
+    def _check_single_main_source(self):
+        for warehouse in self:
+            if not warehouse.x_is_main_source:
+                continue
+            others = self.search([
+                ('id', '!=', warehouse.id),
+                ('x_is_main_source', '=', True),
+                ('company_id', '=', warehouse.company_id.id),
+            ])
+            if others:
+                raise ValidationError(_(
+                    "Only one warehouse per company may be marked as Main Source. "
+                    "Warehouse '%s' is already marked as such."
+                ) % (others[0].name,))
+
+    @api.constrains('x_is_transit', 'company_id')
+    def _check_single_transit(self):
+        for warehouse in self:
+            if not warehouse.x_is_transit:
+                continue
+            others = self.search([
+                ('id', '!=', warehouse.id),
+                ('x_is_transit', '=', True),
+                ('company_id', '=', warehouse.company_id.id),
+            ])
+            if others:
+                raise ValidationError(_(
+                    "Only one warehouse per company may be marked as Transit. "
+                    "Warehouse '%s' is already marked as such."
+                ) % (others[0].name,))

@@ -1,0 +1,481 @@
+import logging
+
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError
+
+_logger = logging.getLogger(__name__)
+
+
+class MbtRequest(models.Model):
+    _name = 'mbt.request'
+    _description = 'Multi-Branch Transfer Request'
+    _inherit = ['mail.thread', 'mail.activity.mixin']
+    _order = 'id desc'
+
+    STATE_SELECTION = [
+        ('draft', 'New'),
+        ('in_progress', 'In Progress'),
+        ('first_done', 'Main → Transit Done'),
+        ('second_done', 'Transit → Branch Done'),
+        ('done', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    name = fields.Char(
+        string='Reference',
+        required=True,
+        readonly=True,
+        copy=False,
+        default='New',
+        index=True,
+    )
+    source_warehouse_id = fields.Many2one(
+        'stock.warehouse',
+        string='Source Warehouse (Main)',
+        tracking=True,
+        help="Main source warehouse. Defaults to the warehouse marked as "
+             "Is Main Source.",
+    )
+    transit_warehouse_id = fields.Many2one(
+        'stock.warehouse',
+        string='Transit Warehouse',
+        tracking=True,
+        help="Transit buffer warehouse. Defaults to the warehouse marked as "
+             "Is Transit.",
+    )
+    dest_warehouse_id = fields.Many2one(
+        'stock.warehouse',
+        string='Destination Warehouse',
+        tracking=True,
+        help="Final destination branch warehouse.",
+    )
+    line_ids = fields.One2many(
+        'mbt.request.line',
+        'request_id',
+        string='Products',
+        copy=True,
+    )
+    state = fields.Selection(
+        STATE_SELECTION,
+        string='Status',
+        default='draft',
+        required=True,
+        readonly=True,
+        copy=False,
+        tracking=True,
+    )
+    scheduled_date = fields.Datetime(
+        string='Scheduled Date',
+        default=fields.Datetime.now,
+    )
+    notes = fields.Html(string='Notes')
+    company_id = fields.Many2one(
+        'res.company',
+        string='Company',
+        required=True,
+        default=lambda self: self.env.company,
+        index=True,
+    )
+    user_id = fields.Many2one(
+        'res.users',
+        string='Requester',
+        default=lambda self: self.env.user,
+        tracking=True,
+    )
+    first_picking_id = fields.Many2one(
+        'stock.picking',
+        string='First Transfer (Main → Transit)',
+        readonly=True,
+        copy=False,
+        ondelete='restrict',
+    )
+    second_picking_id = fields.Many2one(
+        'stock.picking',
+        string='Second Transfer (Transit → Branch)',
+        readonly=True,
+        copy=False,
+        ondelete='restrict',
+    )
+    first_picking_state = fields.Selection(
+        related='first_picking_id.state',
+        string='First Picking State',
+        store=True,
+    )
+    second_picking_state = fields.Selection(
+        related='second_picking_id.state',
+        string='Second Picking State',
+        store=True,
+    )
+
+    @api.onchange('source_warehouse_id', 'transit_warehouse_id')
+    def _onchange_role_warehouses(self):
+        """Auto-fill source/transit from the warehouse role flags if empty."""
+        Warehouse = self.env['stock.warehouse']
+        domain = [('company_id', '=', self.company_id.id)]
+        if not self.source_warehouse_id:
+            main_wh = Warehouse.search(
+                domain + [('x_is_main_source', '=', True)], limit=1)
+            if main_wh:
+                self.source_warehouse_id = main_wh
+        if not self.transit_warehouse_id:
+            transit_wh = Warehouse.search(
+                domain + [('x_is_transit', '=', True)], limit=1)
+            if transit_wh:
+                self.transit_warehouse_id = transit_wh
+
+    def _get_role_warehouses(self):
+        """Return (main_warehouse, transit_warehouse) for the request's company."""
+        self.ensure_one()
+        Warehouse = self.env['stock.warehouse']
+        domain = [('company_id', '=', self.company_id.id)]
+        main_wh = self.source_warehouse_id or Warehouse.search(
+            domain + [('x_is_main_source', '=', True)], limit=1)
+        transit_wh = self.transit_warehouse_id or Warehouse.search(
+            domain + [('x_is_transit', '=', True)], limit=1)
+        return main_wh, transit_wh
+
+    def action_confirm(self):
+        for rec in self:
+            if rec.state != 'draft':
+                continue
+            rec._validate_warehouse_setup()
+            rec._assign_sequence()
+            main_wh, transit_wh = rec._get_role_warehouses()
+            rec._create_pickings(main_wh, transit_wh)
+            rec.write({'state': 'in_progress'})
+            rec.message_post(
+                body=_("<strong>Request confirmed</strong> — pickings created."),
+                subtype_xmlid='mail.mt_note',
+            )
+            try:
+                rec._process_first_and_advance()
+            except Exception as exc:
+                _logger.warning(
+                    "MBT %s: first processing failed (%s). "
+                    "Cron will retry.", rec.name, exc)
+
+    def _validate_warehouse_setup(self):
+        self.ensure_one()
+        if not self.dest_warehouse_id:
+            raise UserError(_("Destination warehouse is required."))
+        if not self.line_ids:
+            raise UserError(_(
+                "Cannot confirm a request with no product lines."))
+        main_wh, transit_wh = self._get_role_warehouses()
+        if not main_wh:
+            raise UserError(_(
+                "Multi-Branch Transfer requires a Source warehouse "
+                "(Main Source)."))
+        if not transit_wh:
+            raise UserError(_(
+                "Multi-Branch Transfer requires a Transit warehouse."))
+        if main_wh.company_id != self.company_id:
+            raise UserError(_(
+                "Source warehouse must belong to the same company as "
+                "the request."))
+        if transit_wh.company_id != self.company_id:
+            raise UserError(_(
+                "Transit warehouse must belong to the same company as "
+                "the request."))
+        if self.dest_warehouse_id.company_id != self.company_id:
+            raise UserError(_(
+                "Destination warehouse must belong to the same company as "
+                "the request."))
+        if main_wh == transit_wh:
+            raise UserError(_(
+                "Source and Transit warehouses must be different."))
+        if main_wh.lot_stock_id == transit_wh.lot_stock_id:
+            raise UserError(_(
+                "Source and Transit warehouses must have different stock "
+                "locations."))
+
+    def _assign_sequence(self):
+        self.ensure_one()
+        if self.name and self.name != 'New':
+            return
+        self.name = self.env['ir.sequence'].next_by_code('mbt.request')
+        if not self.name:
+            raise UserError(_(
+                "Sequence 'mbt.request' is missing — please check the "
+                "Sequence data file."))
+
+    def _create_pickings(self, main_wh, transit_wh):
+        """Build P1 (Main→Transit) and P2 (Transit→Branch) in chain."""
+        self.ensure_one()
+        Picking = self.env['stock.picking']
+        common = {
+            'origin': self.name,
+            'company_id': self.company_id.id,
+            'scheduled_date': self.scheduled_date,
+        }
+
+        p1 = Picking.create(dict(common, **{
+            'picking_type_id': main_wh.int_type_id.id,
+            'location_id': main_wh.lot_stock_id.id,
+            'location_dest_id': transit_wh.lot_stock_id.id,
+        }))
+        self._create_moves(p1, from_loc=main_wh.lot_stock_id,
+                           to_loc=transit_wh.lot_stock_id)
+
+        p2 = Picking.create(dict(common, **{
+            'picking_type_id': transit_wh.int_type_id.id,
+            'location_id': transit_wh.lot_stock_id.id,
+            'location_dest_id': self.dest_warehouse_id.lot_stock_id.id,
+        }))
+        self._create_moves(p2, from_loc=transit_wh.lot_stock_id,
+                           to_loc=self.dest_warehouse_id.lot_stock_id)
+
+        self.write({
+            'first_picking_id': p1.id,
+            'second_picking_id': p2.id,
+        })
+        self.message_post(
+            body=_(
+                "<strong>Pickings created:</strong><br/>"
+                "• First (Source → Transit): %s<br/>"
+                "• Second (Transit → Destination): %s"
+            ) % (p1.name, p2.name),
+            subtype_xmlid='mail.mt_note',
+        )
+
+    def _create_moves(self, picking, from_loc, to_loc):
+        Move = self.env['stock.move']
+        for line in self.line_ids:
+            Move.create({
+                'description_picking_manual': line.product_id.display_name,
+                'product_id': line.product_id.id,
+                'product_uom_qty': line.product_uom_qty,
+                'product_uom': line.product_uom_id.id,
+                'location_id': from_loc.id,
+                'location_dest_id': to_loc.id,
+                'picking_id': picking.id,
+                'company_id': self.company_id.id,
+                'origin': self.name,
+            })
+
+    def _process_first_and_advance(self):
+        """Synchronous first transfer — when stock is available, this
+        completes P1 and synchronously starts P2."""
+        self.ensure_one()
+        if not self.first_picking_id:
+            return
+        self._do_picking(self.first_picking_id)
+        self.invalidate_recordset(['first_picking_state'])
+        if self.first_picking_id.state == 'done' \
+                and self.state == 'in_progress':
+            self.write({'state': 'first_done'})
+            self.message_post(
+                body=_("<strong>First transfer validated</strong> (Source → Transit)."),
+                subtype_xmlid='mail.mt_note',
+            )
+            self._schedule_availability_activity()
+            self._process_second_and_advance()
+
+    def _process_second_and_advance(self):
+        self.ensure_one()
+        if not self.second_picking_id:
+            return
+        self._do_picking(self.second_picking_id)
+        self.invalidate_recordset(['second_picking_state'])
+        if self.second_picking_id.state == 'done' \
+                and self.state == 'first_done':
+            self.write({'state': 'second_done'})
+            self.write({'state': 'done'})
+            self.message_post(
+                body=_("<strong>Second transfer validated</strong> (Transit → Destination) — request %s completed.") % self.name,
+                subtype_xmlid='mail.mt_note',
+            )
+
+    def _do_picking(self, picking):
+        """Confirm → reserve → validate a picking, gracefully stopping if
+        stock is not yet available."""
+        self.ensure_one()
+        if picking.state in ('done', 'cancel'):
+            return
+        if picking.state == 'draft':
+            try:
+                picking.action_confirm()
+                picking.invalidate_recordset(['state'])
+            except Exception as exc:
+                _logger.info("Picking %s confirm failed: %s",
+                             picking.name, exc)
+                return
+        if picking.state in ('confirmed', 'waiting', 'partially_available'):
+            try:
+                picking.action_assign()
+                picking.invalidate_recordset(['state'])
+            except UserError as exc:
+                _logger.info("Picking %s assign deferred: %s",
+                             picking.name, exc)
+                self._schedule_availability_activity()
+                return
+            except Exception as exc:
+                _logger.info("Picking %s assign failed: %s",
+                             picking.name, exc)
+                return
+        if picking.state == 'assigned':
+            self._auto_validate_picking(picking)
+            picking.invalidate_recordset(['state'])
+        elif picking.state in ('confirmed', 'waiting', 'partially_available'):
+            self._schedule_availability_activity()
+
+    def _auto_validate_picking(self, picking):
+        """Validate picking after auto-filling quantity on its move lines."""
+        moves = picking.move_ids.filtered(
+            lambda m: m.state not in ('done', 'cancel'))
+        if not moves:
+            return
+        for move in moves:
+            if not move.move_line_ids:
+                continue
+            for ml in move.move_line_ids:
+                if not ml.quantity:
+                    ml.quantity = move.product_uom_qty
+        try:
+            picking.with_context(skip_sanity_check=True).button_validate()
+        except UserError as exc:
+            _logger.info("Picking %s validation deferred: %s",
+                         picking.name, exc)
+
+    def _schedule_availability_activity(self):
+        """Schedule a 'waiting for stock' activity on the request."""
+        self.ensure_one()
+        if not self.user_id:
+            return
+        existing = self.activity_ids.filtered(
+            lambda a: a.summary == "Awaiting stock availability"
+            and not a.date_done)
+        if existing:
+            return
+        try:
+            self.activity_schedule(
+                'mail.mail_activity_data_todo',
+                summary=_("Awaiting stock availability"),
+                note=_("The Multi-Branch Transfer request is waiting for "
+                       "stock to be available. The cron job will pick it up "
+                       "automatically."),
+                user_id=self.user_id.id,
+            )
+        except Exception as exc:
+            _logger.info("Could not schedule activity: %s", exc)
+
+    @api.model
+    def cron_reprocess(self):
+        """Scheduled action: pick up requests stuck because stock was missing.
+        Idempotent and safe to run repeatedly."""
+        stuck = self.search([
+            ('state', 'in', ('in_progress', 'first_done')),
+        ])
+        for rec in stuck:
+            try:
+                if rec.state == 'in_progress':
+                    rec._process_first_and_advance()
+                elif rec.state == 'first_done':
+                    rec._process_second_and_advance()
+            except Exception as exc:
+                _logger.info("Cron: MBT %s still pending: %s", rec.name, exc)
+        return True
+
+    def action_cancel(self):
+        for rec in self:
+            cancellable_states = ('draft', 'in_progress', 'first_done')
+            if rec.state not in cancellable_states:
+                raise UserError(_(
+                    "Request cannot be cancelled in state '%s'.") % rec.state)
+            if rec.first_picking_id and rec.first_picking_id.state == 'done':
+                raise UserError(_(
+                    "First transfer is already done; cancellation no longer "
+                    "allowed at this stage."))
+            if rec.second_picking_id and rec.second_picking_id.state == 'done':
+                raise UserError(_(
+                    "Second transfer is already done; request is already "
+                    "completed."))
+            for picking in (rec.first_picking_id, rec.second_picking_id):
+                if picking and picking.state not in ('done', 'cancel'):
+                    try:
+                        picking.action_cancel()
+                    except Exception as exc:
+                        _logger.warning(
+                            "Could not cancel picking %s: %s",
+                            picking.name, exc)
+            rec.write({'state': 'cancelled'})
+            rec.message_post(
+                body=_("<strong>Request %s cancelled.</strong>") % rec.name,
+                subtype_xmlid='mail.mt_note',
+            )
+
+    def action_reset_to_draft(self):
+        """Manager-only escape hatch.
+
+        Cancels any related pickings that have not yet been completed
+        before resetting the request to draft, so no orphan transfers
+        remain in flight.
+        """
+        for rec in self:
+            if not self.env.user.has_group(
+                    'multi_branch_transfer.group_mbt_manager'):
+                raise UserError(_(
+                    "Only managers may reset a Multi-Branch Transfer request."))
+            if rec.state == 'done':
+                raise UserError(_(
+                    "Cannot reset a completed request to draft."))
+            if rec.first_picking_id and rec.first_picking_id.state == 'done':
+                raise UserError(_(
+                    "First transfer is already done; this request cannot be "
+                    "reset to draft."))
+            cancelled = []
+            for picking in (rec.first_picking_id, rec.second_picking_id):
+                if picking and picking.state not in ('done', 'cancel'):
+                    try:
+                        picking.action_cancel()
+                        cancelled.append(picking.name)
+                    except Exception as exc:
+                        _logger.warning(
+                            "Could not cancel picking %s: %s",
+                            picking.name, exc)
+            rec.write({
+                'state': 'draft',
+                'first_picking_id': False,
+                'second_picking_id': False,
+            })
+            body = _("Request reset to draft by manager.")
+            if cancelled:
+                body += _("<br/>Cancelled related transfers: %s") % ", ".join(
+                    cancelled)
+            rec.message_post(
+                body=body,
+                subtype_xmlid='mail.mt_note',
+            )
+
+    def unlink(self):
+        for rec in self:
+            if rec.state not in ('draft', 'cancelled'):
+                raise UserError(_(
+                    "Cannot delete a request in state '%s'. "
+                    "Cancel it first.") % rec.state)
+        return super().unlink()
+
+    def write(self, vals):
+        for rec in self:
+            if 'line_ids' in vals and rec.state != 'draft':
+                raise UserError(_(
+                    "Lines can only be edited while the request is in draft."))
+        return super().write(vals)
+
+    def action_open_first_picking(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'stock.picking',
+            'view_mode': 'form',
+            'res_id': self.first_picking_id.id,
+        }
+
+    def action_open_second_picking(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'stock.picking',
+            'view_mode': 'form',
+            'res_id': self.second_picking_id.id,
+        }

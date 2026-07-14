@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Multi-Branch Transfer (Transit-Aware)</title>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif;
+         max-width: 820px; margin: 2rem auto; padding: 0 1rem;
+         color: #1d2939; line-height: 1.6; }
+  h1, h2, h3 { color: #0f172a; }
+  .hero { background: linear-gradient(135deg, #155eef 0%, #0a3a9e 100%);
+          color: white; padding: 1.75rem; border-radius: .5rem;
+          margin-bottom: 1.5rem; }
+  .pill { display: inline-block; background: rgba(255,255,255,.2);
+          padding: .25rem .8rem; border-radius: 999px; font-size: .85rem;
+          margin-right: .25rem; }
+  ul, ol { padding-left: 1.5rem; }
+  code { background: #f1f5f9; padding: .1rem .35rem; border-radius: 4px;
+         font-size: 90%; }
+  .shot { display: block; margin: 1rem auto; max-width: 100%;
+          border: 1px solid #e4e7ec; border-radius: .5rem;
+          box-shadow: 0 1px 2px rgba(16,24,40,.05); }
+  .caption { text-align: center; font-style: italic;
+             color: #475467; margin-top: -.25rem; }
+  .step { background: #f9fafb; border-left: 4px solid #155eef;
+          padding: .75rem 1rem; margin: 1rem 0; border-radius: .25rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+  <div class="hero">
+    <h1 style="color:white; margin:0 0 .5rem 0;">Multi-Branch Transfer</h1>
+    <span class="pill">Inventory</span>
+    <span class="pill">Transit-Aware</span>
+    <span class="pill">Odoo 19 · LGPL-3</span>
+    <p>One-click two-hop internal transfer:
+       <code>Source → Transit → Destination</code>.</p>
+  </div>
+
+  <h2>What it does</h2>
+  <p>Creates and chains the two internal transfers needed to send goods from
+     a Source warehouse to a Destination branch via a Transit buffer —
+     automatically, with zero manual picking clicks.</p>
+
+  <h2>How to use — step by step</h2>
+
+  <h3>Step 1 — Tag your warehouses (one-time)</h3>
+  <div class="step">
+    Go to <strong>Inventory → Configuration → Warehouses</strong>. Open each
+    warehouse and tick:
+    <ul>
+      <li><strong>Is Main Source</strong> on the warehouse that supplies goods.</li>
+      <li><strong>Is Transit</strong> on the warehouse that buffers them.</li>
+    </ul>
+    Any warehouse that is not flagged this way is automatically treated as a
+    possible destination branch.
+  </div>
+
+  <h3>Step 2 — Create a transfer</h3>
+  <div class="step">
+    Open <strong>Inventory → Operations → Multi-Branch Transfers → Transfers</strong>
+    and click <strong>New</strong>.
+  </div>
+  <div class="grid">
+    <div>
+      <p>Pick <strong>Source</strong>, <strong>Transit</strong> and
+         <strong>Destination</strong> warehouses (defaults pre-filled from the
+         tags above).</p>
+    </div>
+    <div>
+      <p>Add product lines with the quantities to ship and click
+         <strong>Save</strong>.</p>
+    </div>
+  </div>
+
+  <h3>Step 3 — Confirm</h3>
+  <div class="step">
+    Click <strong>Confirm</strong>. The module:
+    <ol>
+      <li>Validates the warehouse setup (different locations, same company).</li>
+      <li>Assigns a sequence reference (<code>MBT/&lt;year&gt;/NNNNN</code>).</li>
+      <li>Creates the first internal transfer
+          (<code>Source → Transit</code>).</li>
+      <li>Creates the second internal transfer
+          (<code>Transit → Destination</code>).</li>
+      <li>Auto-confirms and reserves both pickings when stock is available.</li>
+      <li>Auto-validates each picking in turn.</li>
+      <li>Posts a chatter entry for every step.</li>
+    </ol>
+  </div>
+
+  <h3>Step 4 — Monitor</h3>
+  <div class="step">
+    Open the request to see the status bar (<em>New → In Progress → Main →
+    Transit Done → Transit → Branch Done → Completed</em>), the two smart
+    buttons to jump straight to each transfer, and the full chatter history
+    at the bottom.
+  </div>
+
+  <h3>Step 5 — Manage exceptions</h3>
+  <ul>
+    <li><strong>No stock yet?</strong> The request stays at
+        <em>In Progress</em>. The cron job
+        <em>Multi-Branch Transfer: reprocess pending</em> runs every 15 minutes
+        and finishes the chain once stock arrives. You can also call
+        <em>Inventory → Multi-Branch Transfers → Run Reprocess Now</em>.</li>
+    <li><strong>Cancel?</strong> The <em>Cancel</em> button cancels both
+        in-flight pickings and moves the request to <em>Cancelled</em>.</li>
+    <li><strong>Reset to draft?</strong> Managers can reset a non-completed
+        request back to draft. Any in-flight related transfer is
+        automatically cancelled.</li>
+  </ul>
+
+  <h2>Module structure</h2>
+  <ul>
+    <li><code>mbt.request</code> — the transfer request.</li>
+    <li><code>mbt.request.line</code> — products / quantities on the request.</li>
+    <li><code>stock.warehouse</code> — gains <code>x_is_main_source</code> and
+        <code>x_is_transit</code> flags.</li>
+  </ul>
+
+  <h2>Access rights</h2>
+  <p>The module ships with two groups under
+     <em>Inventory → Configuration → User groups → Multi-Branch Transfer</em>:</p>
+  <ul>
+    <li><strong>User</strong> — create and process requests.</li>
+    <li><strong>Manager</strong> — additionally reset / unlink requests.</li>
+  </ul>
+  <p>Multi-company record rules are pre-configured so users only see their
+     own company's requests.</p>
+
+  <h2>Support</h2>
+  <p>Email <a href="mailto:ahmedrashedy001@gmail.com">ahmedrashedy001@gmail.com</a>
+     or call <strong>+20 112 207 9077</strong> for questions or
+     customisations.</p>
+
+</body>
+</html>

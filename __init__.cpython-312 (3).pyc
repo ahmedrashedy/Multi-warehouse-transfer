@@ -1,0 +1,6 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_mbt_request_user,mbt.request.user,model_mbt_request,multi_branch_transfer.group_mbt_user,1,1,1,0
+access_mbt_request_manager,mbt.request.manager,model_mbt_request,multi_branch_transfer.group_mbt_manager,1,1,1,1
+access_mbt_request_line_user,mbt.request.line.user,model_mbt_request_line,multi_branch_transfer.group_mbt_user,1,1,1,0
+access_mbt_request_line_manager,mbt.request.line.manager,model_mbt_request_line,multi_branch_transfer.group_mbt_manager,1,1,1,1
+access_mbt_warehouse_read,mbt.warehouse.read,model_stock_warehouse,multi_branch_transfer.group_mbt_user,1,0,0,0

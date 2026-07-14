@@ -1,0 +1,72 @@
+{
+    'name': 'Multi-Branch Transfer (Transit-Aware)',
+    'version': '19.0.1.0.0',
+    'summary': 'One-click two-hop internal transfer: Source → Transit → Destination.',
+    'description': """
+Multi-Branch Transfer (Transit-Aware)
+=====================================
+
+Chain internal transfers across two hops with a single click:
+**Source → Transit → Destination**.
+
+Highlights
+---------
+
+* **Two-hop pickings** — one user action creates both internal transfers
+  (Source → Transit, then Transit → Destination) and chains them.
+* **All warehouses selectable** — Source, Transit and Destination warehouses
+  can be picked manually. The system still auto-fills Source / Transit from
+  the warehouses flagged as *Is Main Source* / *Is Transit* when those flags
+  are set on the warehouse form.
+* **Automatic processing** — when stock is available, both pickings are
+  confirmed, reserved and validated synchronously. Otherwise a cron job
+  picks them up as soon as stock is replenished.
+* **Chatter history** — every event (confirm, picking creation, transfer
+  validation, cancellation, reset-to-draft) is logged on the chatter with
+  a proper subject so the history reads like a normal Odoo workflow.
+* **Reset-to-draft closes related transfers** — managers can reset a request
+  back to draft; any in-flight related pickings are cancelled automatically.
+* **Access control** — User / Manager groups, per-company record rules.
+
+Workflow
+--------
+
+1. Open *Inventory → Multi-Branch Transfers → Transfers*.
+2. Click **New**, pick Source / Transit / Destination warehouses, add product
+   lines with quantities.
+3. Click **Confirm**. Two internal transfers are created and chained.
+4. The first transfer is processed; once it is validated, the second is
+   processed automatically.
+5. If stock is not yet available, an *Awaiting stock availability* activity
+   is scheduled on the request; the cron job retries until stock is found.
+
+Compatibility
+-------------
+
+* Odoo **19.0** Community / Enterprise.
+* Depends on `stock`, `mail`, and `product`.
+""",
+    'category': 'Inventory/Inventory',
+    'license': 'LGPL-3',
+    'author': 'Ahmed Rashedy',
+    'maintainer': 'Ahmed Rashedy <ahmedrashedy001@gmail.com>',
+    'website': '',
+    'support': 'ahmedrashedy001@gmail.com',
+    'author_phone': '+201122079077',
+    'depends': ['stock', 'mail', 'product'],
+    'data': [
+        'security/security.xml',
+        'security/ir.model.access.csv',
+        'data/ir_sequence_data.xml',
+        'data/ir_cron_data.xml',
+        'views/stock_warehouse_views.xml',
+        'views/mbt_request_views.xml',
+        'views/menus.xml',
+        'views/mail_message_inherit.xml',
+    ],
+    'installable': True,
+    'application': False,
+    'auto_install': False,
+    'price': 0.0,
+    'currency': 'EUR',
+}
